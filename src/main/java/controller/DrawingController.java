@@ -1,6 +1,11 @@
 package controller;
+
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Map;
 
+import command.AddShapeCommand;
+import command.DrawCommand;
 import factory.ShapeFactory;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
@@ -16,7 +21,6 @@ import model.*;
 import java.io.*;
 import java.sql.SQLException;
 
-
 public class DrawingController {
 
     private BorderPane root = new BorderPane();
@@ -31,11 +35,15 @@ public class DrawingController {
     private DrawingDAO drawingDAO = new DrawingDAO();
 
     private ComboBox<String> loggerSelector = new ComboBox<>();
-    
-    private Button saveBtn = new Button("Enregistrer");
-    private Button loadBtn = new Button("Charger");
-    private Button clearBtn = new Button("Supprimer les formes"); // ✅ Nouveau bouton
+
+    private Button saveBtn     = new Button("Enregistrer");
+    private Button loadBtn     = new Button("Charger");
+    private Button clearBtn    = new Button("Supprimer les formes");
     private Button clearLogsBtn = new Button("Vider logs DB");
+    private Button undoBtn     = new Button("Annuler");
+
+    // Command pattern history stack
+    private Deque<DrawCommand> commandHistory = new ArrayDeque<>();
 
     public DrawingController() {
         setupLogger();
@@ -45,12 +53,11 @@ public class DrawingController {
 
     private void setupLogger() {
         loggerSelector.getItems().addAll("Console", "Fichier", "Base de données");
-        loggerSelector.setValue("Console"); // ⬅️ Défaut : Console
+        loggerSelector.setValue("Console");
         loggerContext = new LoggerContext(new ConsoleLogger());
 
         loggerSelector.setOnAction(e -> {
             String choice = loggerSelector.getValue();
-
             switch (choice) {
                 case "Console":
                     loggerContext.setStrategy(new ConsoleLogger());
@@ -58,7 +65,7 @@ public class DrawingController {
                     break;
                 case "Fichier":
                     FileLogger fileLogger = new FileLogger();
-                    fileLogger.clearLog(); // ✅ Vider le fichier
+                    fileLogger.clearLog();
                     loggerContext.setStrategy(fileLogger);
                     loggerContext.log("Stratégie de journalisation changée à Fichier");
                     break;
@@ -69,18 +76,10 @@ public class DrawingController {
             }
         });
     }
- // Exemple dans un contrôleur ou classe main
+
     public void clearLogsTable() {
         DBLogger logger = new DBLogger();
         logger.clearLogs();
-    }
-
-    private void clearLogFile() {
-        try (PrintWriter writer = new PrintWriter(new FileWriter("app.log", false))) {
-            // On écrase le fichier avec rien
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
     }
 
     private void setupUI() {
@@ -96,16 +95,18 @@ public class DrawingController {
         ToggleButton btnLine = createIconButton("Ligne", ShapeType.LINE);
         btnLine.setToggleGroup(toggleGroup);
 
-        // Configuration bouton clearLogsBtn ici (action)
         clearLogsBtn.setOnAction(e -> {
             clearLogsTable();
             loggerContext.log("Table logs vidée.");
         });
 
-        // Une seule déclaration de palette, avec TOUS les boutons
-        HBox palette = new HBox(10, btnRect, btnCircle, btnLine, loggerSelector, saveBtn, loadBtn, clearBtn, clearLogsBtn);
+        undoBtn.setDisable(true);
+
+        HBox palette = new HBox(10, btnRect, btnCircle, btnLine, loggerSelector,
+                saveBtn, loadBtn, undoBtn, clearBtn, clearLogsBtn);
         palette.setPadding(new Insets(10));
-        palette.setBackground(new Background(new BackgroundFill(Color.LIGHTGRAY, CornerRadii.EMPTY, Insets.EMPTY)));
+        palette.setBackground(new Background(
+                new BackgroundFill(Color.LIGHTGRAY, CornerRadii.EMPTY, Insets.EMPTY)));
 
         root.setTop(palette);
         root.setCenter(drawingPane);
@@ -118,7 +119,6 @@ public class DrawingController {
             }
         });
     }
-
 
     private ToggleButton createIconButton(String tooltipText, ShapeType shapeType) {
         Shape icon;
@@ -151,6 +151,16 @@ public class DrawingController {
         drawingPane.setOnMousePressed(this::onMousePressed);
         drawingPane.setOnMouseReleased(this::onMouseReleased);
 
+        // Undo button
+        undoBtn.setOnAction(e -> {
+            if (!commandHistory.isEmpty()) {
+                DrawCommand cmd = commandHistory.pop();
+                cmd.undo();
+                undoBtn.setDisable(commandHistory.isEmpty());
+                loggerContext.log("Action annulée");
+            }
+        });
+
         saveBtn.setOnAction(e -> {
             TextInputDialog dialog = new TextInputDialog();
             dialog.setTitle("Nom du dessin");
@@ -162,9 +172,7 @@ public class DrawingController {
                     showAlert("Erreur", "Le nom ne peut pas être vide !");
                     return;
                 }
-
                 drawing.setName(name);
-
                 try {
                     drawingDAO.saveDrawing(drawing);
                     loggerContext.log("Dessin '" + name + "' sauvegardé en base");
@@ -176,17 +184,14 @@ public class DrawingController {
             });
         });
 
-
         loadBtn.setOnAction(e -> {
             try {
                 Map<Integer, String> drawingsMap = drawingDAO.getDrawingsList();
-
                 if (drawingsMap.isEmpty()) {
                     showAlert("Info", "Aucun dessin sauvegardé en base.");
                     return;
                 }
 
-                // Création d’une fenêtre/dialog avec une ListView pour sélectionner un dessin
                 Stage dialogStage = new Stage();
                 dialogStage.setTitle("Sélectionner un dessin à charger");
 
@@ -196,27 +201,24 @@ public class DrawingController {
                 Button loadSelectedBtn = new Button("Charger");
                 loadSelectedBtn.setDisable(true);
 
-                listView.getSelectionModel().selectedIndexProperty().addListener((obs, oldV, newV) -> {
-                    loadSelectedBtn.setDisable(newV.intValue() < 0);
-                });
+                listView.getSelectionModel().selectedIndexProperty().addListener((obs, oldV, newV) ->
+                        loadSelectedBtn.setDisable(newV.intValue() < 0));
 
                 loadSelectedBtn.setOnAction(ev -> {
                     int selectedIndex = listView.getSelectionModel().getSelectedIndex();
                     if (selectedIndex >= 0) {
                         Integer selectedId = (Integer) drawingsMap.keySet().toArray()[selectedIndex];
-
                         try {
-                            drawingPane.getChildren().clear(); // Nettoyer le canvas
-                            drawing = drawingDAO.loadDrawing(selectedId); // Charger depuis DB
-                            
+                            drawingPane.getChildren().clear();
+                            commandHistory.clear();
+                            undoBtn.setDisable(true);
+                            drawing = drawingDAO.loadDrawing(selectedId);
                             for (ShapeModel sm : drawing.getShapes()) {
                                 drawingPane.getChildren().add(sm.getShape());
                             }
-
                             loggerContext.log("Dessin '" + drawing.getName() + "' chargé.");
                             showAlert("Succès", "Dessin chargé : " + drawing.getName());
                             dialogStage.close();
-
                         } catch (SQLException ex) {
                             ex.printStackTrace();
                             showAlert("Erreur", "Échec du chargement : " + ex.getMessage());
@@ -236,10 +238,11 @@ public class DrawingController {
             }
         });
 
-        // ✅ Action bouton "Supprimer les formes"
         clearBtn.setOnAction(e -> {
-            drawing.clear(); // vide la liste interne
-            drawingPane.getChildren().clear(); // vide l'affichage
+            drawing.clear();
+            drawingPane.getChildren().clear();
+            commandHistory.clear();
+            undoBtn.setDisable(true);
             loggerContext.log("Toutes les formes ont été supprimées");
         });
     }
@@ -254,10 +257,15 @@ public class DrawingController {
         double endY = e.getY();
 
         ShapeModel shape = ShapeFactory.createShape(currentShapeType, startX, startY, endX, endY);
-        drawing.addShape(shape);
-        drawingPane.getChildren().add(shape.getShape());
 
-        loggerContext.log("Forme dessinée: " + currentShapeType + " de (" + startX + "," + startY + ") à (" + endX + "," + endY + ")");
+        // Command pattern: wrap the action and execute it
+        DrawCommand cmd = new AddShapeCommand(shape, drawing, drawingPane);
+        cmd.execute();
+        commandHistory.push(cmd);
+        undoBtn.setDisable(false);
+
+        loggerContext.log("Forme dessinée: " + currentShapeType +
+                " de (" + startX + "," + startY + ") à (" + endX + "," + endY + ")");
 
         if (loggerContext.getStrategy() instanceof FileLogger) {
             showLogFile();
@@ -296,16 +304,6 @@ public class DrawingController {
         textArea.setWrapText(true);
         textArea.setPrefSize(600, 400);
         alert.getDialogPane().setContent(textArea);
-
         alert.showAndWait();
-    }
-
-    private void openFileDrawingPage() {
-        Stage stage = new Stage();
-        DrawingController newController = new DrawingController();
-        Scene scene = new Scene(newController.getView(), 800, 600);
-        stage.setTitle("Zone de dessin - Logger Fichier");
-        stage.setScene(scene);
-        stage.show();
     }
 }
